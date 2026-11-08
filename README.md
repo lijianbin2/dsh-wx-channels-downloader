@@ -5,7 +5,11 @@
 
 ## 装到另一台电脑
 
-1. 把整个 `wx-channels-downloader` 目录拷到新电脑（放在任意位置，例如 `D:\DSH\wx-channels-downloader`）。
+仓库地址：<https://github.com/lijianbin2/dsh-wx-channels-downloader>
+
+1. 把仓库取到新电脑（二选一）：
+   - `git clone https://github.com/lijianbin2/dsh-wx-channels-downloader.git`
+   - 或者直接下载 ZIP 解压，放在任意位置（例如 `H:\DSH\wx-channels-downloader`）
 2. 在 DSH 里用插件管理器安装这个目录：
    - 让 DSH 的 AI 执行 `install_bundle`，`target` 填该目录的绝对路径；
    - 或直接装这个包目录（它是一个标准的 DSH bundle，`cordis.patch.yml` 里声明了插件行）。
