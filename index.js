@@ -1569,6 +1569,93 @@ async function actionWechatRestart() {
  * open, which is what makes a freshly started proxy take effect. WeChat itself
  * (Weixin.exe) is never touched.
  */
+/**
+ * Opens (or reloads) the Channels page by double-clicking its entry in WeChat's
+ * Discover list through UI Automation. That is the step the user does by hand:
+ * a fresh page load is what makes the intercepted proxy take effect. PowerShell
+ * runs through wscript with a hidden window, so nothing flashes.
+ */
+const AUTO_OPEN_PS = String.raw`$ErrorActionPreference = 'Stop'
+$out = $args[0]
+$result = 'unknown'
+try {
+  Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes
+  Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+public class WxMouse {
+  [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
+  [DllImport("user32.dll")] public static extern void mouse_event(uint f, uint dx, uint dy, uint d, IntPtr e);
+}
+"@
+  $root = [System.Windows.Automation.AutomationElement]::RootElement
+  $cond = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::ClassNameProperty, 'mmui::MainWindow')
+  $win = $root.FindFirst([System.Windows.Automation.TreeScope]::Children, $cond)
+  if (-not $win) {
+    $result = 'no-wechat'
+  } else {
+    $cellName = [string]::new([char[]]@(0x89C6, 0x9891, 0x53F7))
+    $tabName = [string]::new([char[]]@(0x53D1, 0x73B0))
+    $all = $win.FindAll([System.Windows.Automation.TreeScope]::Descendants, [System.Windows.Automation.Condition]::TrueCondition)
+    $cell = $all | Where-Object { $_.Current.Name -eq $cellName -and $_.Current.ClassName -eq 'mmui::ExtensionDiscoverContentCell' } | Select-Object -First 1
+    if (-not $cell) {
+      $tab = $all | Where-Object { $_.Current.Name -eq $tabName -and $_.Current.ClassName -eq 'mmui::XTabBarItem' } | Select-Object -First 1
+      if ($tab) {
+        $inv = $null
+        if ($tab.TryGetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern, [ref]$inv)) { $inv.Invoke() }
+        Start-Sleep -Milliseconds 700
+        $all = $win.FindAll([System.Windows.Automation.TreeScope]::Descendants, [System.Windows.Automation.Condition]::TrueCondition)
+        $cell = $all | Where-Object { $_.Current.Name -eq $cellName -and $_.Current.ClassName -eq 'mmui::ExtensionDiscoverContentCell' } | Select-Object -First 1
+      }
+    }
+    if (-not $cell) {
+      $result = 'no-cell'
+    } else {
+      $r = $cell.Current.BoundingRectangle
+      $x = [int]($r.X + $r.Width / 2)
+      $y = [int]($r.Y + $r.Height / 2)
+      [WxMouse]::SetCursorPos($x, $y) | Out-Null
+      Start-Sleep -Milliseconds 200
+      [WxMouse]::mouse_event(0x0002, 0, 0, 0, [IntPtr]::Zero); Start-Sleep -Milliseconds 40
+      [WxMouse]::mouse_event(0x0004, 0, 0, 0, [IntPtr]::Zero); Start-Sleep -Milliseconds 90
+      [WxMouse]::mouse_event(0x0002, 0, 0, 0, [IntPtr]::Zero); Start-Sleep -Milliseconds 40
+      [WxMouse]::mouse_event(0x0004, 0, 0, 0, [IntPtr]::Zero)
+      $result = 'ok'
+    }
+  }
+} catch {
+  $result = 'error: ' + $_.Exception.Message
+}
+Set-Content -LiteralPath $out -Value $result -Encoding ascii
+`;
+
+async function actionWechatOpenChannels() {
+  if (!isWindows()) throw new RpcError('unsupported-platform', '自动打开视频号只支持 Windows');
+  const stamp = `${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
+  const script = path.join(os.tmpdir(), `wxdl-open-${stamp}.ps1`);
+  const resultFile = path.join(os.tmpdir(), `wxdl-open-${stamp}.txt`);
+  const runner = path.join(os.tmpdir(), `wxdl-open-${stamp}.vbs`);
+  // PowerShell 5.1 reads a BOM-less UTF-8 file as ANSI; the script is ASCII-only,
+  // but a BOM keeps it readable if someone edits it later.
+  await fs.writeFile(script, AUTO_OPEN_PS, 'utf8');
+  await fs.writeFile(
+    runner,
+    `Set shell = CreateObject("WScript.Shell")\r\nshell.Run "powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File ""${script}"" ""${resultFile}""", 0, True\r\n`,
+    'utf8',
+  );
+  try {
+    await execFileAsync('wscript.exe', ['//nologo', runner], { windowsHide: true, timeout: 30000 });
+    const result = String(await fs.readFile(resultFile, 'utf8') || '').trim();
+    if (result !== 'ok') {
+      throw new RpcError('open-channels-failed', `自动打开视频号失败：${result || '没有返回结果'}`);
+    }
+    return { opened: true };
+  } finally {
+    await fs.rm(script, { force: true }).catch(() => undefined);
+    await fs.rm(runner, { force: true }).catch(() => undefined);
+    await fs.rm(resultFile, { force: true }).catch(() => undefined);
+  }
+}
 async function actionWechatReloadChannels() {
   if (!isWindows()) throw new RpcError('unsupported-platform', '重载视频号页面只支持 Windows');
   const before = (await queryProcessIds('WeChatAppEx.exe')).length;
@@ -1645,6 +1732,7 @@ const ACTIONS = {
   'app.stop': actionAppStop,
   'wechat.restart': actionWechatRestart,
   'wechat.reloadChannels': actionWechatReloadChannels,
+  'wechat.openChannels': actionWechatOpenChannels,
   'clipboard.read': actionClipboardRead,
   'dir.pick': actionDirPick,
   'app.ensure': actionAppEnsure,

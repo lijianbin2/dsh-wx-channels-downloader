@@ -150,6 +150,7 @@ window.__ModuleLoader__.load({
       'wechat.restart': 60000,
       'dir.pick': 185000,
       'wechat.reloadChannels': 30000,
+      'wechat.openChannels': 45000,
       'app.detect': 30000,
       'proxy.start': 20000,
       'proxy.stop': 40000,
@@ -296,6 +297,7 @@ window.__ModuleLoader__.load({
           const closeRef = React.useRef(closeAfterDownload);
           const previewRef = React.useRef(null);
           const previewIdleRef = React.useRef(null);
+          const autoOpenedRef = React.useRef(false);
           const flowIdRef = React.useRef(0);
           autoRestoreRef.current = autoRestore;
           closeRef.current = closeAfterDownload;
@@ -401,6 +403,7 @@ window.__ModuleLoader__.load({
 
           async function waitForChannels() {
             const started = Date.now();
+            autoOpenedRef.current = false;
             while (Date.now() - started < CHANNELS_WAIT_MS) {
               if (cancelRef.current) return null;
               const next = await refreshState();
@@ -409,14 +412,19 @@ window.__ModuleLoader__.load({
                 return next;
               }
               const waited = Date.now() - started;
-              // WeChat's webview processes fix their network path when they start,
-              // so a Channels window opened before the proxy was on stays direct.
+              const autoNow = waited > 18000 && !autoOpenedRef.current;
+              if (autoNow) {
+                autoOpenedRef.current = true;
+                rpc('wechat.openChannels').catch(() => undefined);
+              }
               setNeedChannels(true);
               setHint({
-                tone: 'warn',
-                text: waited < 25000
-                  ? t('现在去微信里打开「视频号」（推荐页就行），连上后我会自动继续…', 'Open Channels in WeChat now — I will continue automatically.')
-                  : t('视频号窗口没有关闭按钮也没关系：点下面的「重启微信以接入代理」，我会把微信退出再重新打开（代理保持开启），然后你在微信里点开视频号就行。', 'No close button on that window? Use "Restart WeChat" below — I relaunch WeChat with the proxy still on, then just open Channels again.'),
+                tone: autoNow ? '' : 'warn',
+                text: autoNow
+                  ? t('没有检测到视频号页面，正在用界面自动化帮你双击打开它…', 'No Channels page yet — opening it for you through UI automation…')
+                  : waited < 25000
+                    ? t('现在去微信里打开「视频号」（推荐页就行），连上后我会自动继续…', 'Open Channels in WeChat now — I will continue automatically.')
+                    : t('如果自动打开没成功，点「自动打开视频号」再试一次；实在不行用「重启微信」。', 'If the automatic open did not help, press "Open Channels" once more, or fall back to "Restart WeChat".'),
               });
               await sleep(2000);
             }
@@ -838,6 +846,21 @@ window.__ModuleLoader__.load({
           const busy = stage === 'preparing' || stage === 'working' || stage === 'waiting' || stage === 'resolving' || stage === 'downloading' || stage === 'previewing';
 
           /** Lighter than restarting WeChat: reset its webview so Channels reloads. */
+          /** Double-clicks the Channels entry in WeChat via UI Automation. */
+          async function openChannels() {
+            setAppBusy(true);
+            setHint({ tone: '', text: t('正在打开视频号…', 'Opening Channels…') });
+            try {
+              await rpc('wechat.openChannels');
+              setHint({ tone: 'warn', text: t('已帮你打开视频号，等它加载完就会自动继续。', 'Channels opened — waiting for it to load.') });
+              await refreshState();
+            } catch (error) {
+              setHint({ tone: 'bad', text: error.message });
+            } finally {
+              if (aliveRef.current) setAppBusy(false);
+            }
+          }
+
           async function reloadChannels() {
             setAppBusy(true);
             setHint({ tone: '', text: t('正在重置微信的网页进程…', 'Resetting WeChat webviews…') });
@@ -972,8 +995,8 @@ window.__ModuleLoader__.load({
                             ? h(React.Fragment, null,
                               h('button', {
                                 type: 'button', className: 'wxdl-btn wxdl-btn-sm wxdl-btn-primary',
-                                disabled: appBusy, onClick: reloadChannels,
-                              }, h(Glyph, { name: 'refresh', spin: appBusy }), t('重载视频号页面', 'Reload Channels page')),
+                                disabled: appBusy, onClick: openChannels,
+                              }, h(Glyph, { name: 'refresh', spin: appBusy }), t('自动打开视频号', 'Open Channels')),
                               h('button', {
                                 type: 'button', className: 'wxdl-btn wxdl-btn-sm',
                                 disabled: appBusy, onClick: restartWechat,
@@ -1073,8 +1096,8 @@ window.__ModuleLoader__.load({
                         ? h('div', { className: 'wxdl-state-actions' },
                           h('button', {
                             type: 'button', className: 'wxdl-btn wxdl-btn-sm wxdl-btn-primary',
-                            disabled: appBusy, onClick: reloadChannels,
-                          }, h(Glyph, { name: 'refresh', spin: appBusy }), t('重载视频号页面', 'Reload Channels page')),
+                            disabled: appBusy, onClick: openChannels,
+                          }, h(Glyph, { name: 'refresh', spin: appBusy }), t('自动打开视频号', 'Open Channels')),
                           h('button', {
                             type: 'button', className: 'wxdl-btn wxdl-btn-sm',
                             disabled: appBusy, onClick: restartWechat,
