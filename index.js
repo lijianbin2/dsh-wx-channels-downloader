@@ -217,18 +217,53 @@ function isWindows() {
  * window on this machine, so the plugin uses wscript instead: it is a GUI host,
  * spawns no console, and can still reach the registry and WMI.
  */
-async function runWscript(body, args = []) {
+/**
+ * hidden defaults to true: wscript is a GUI host, so hiding it only suppresses
+ * the windows it creates. A script that must show a dialog passes hidden:false.
+ */
+async function runWscript(body, args = [], timeoutMs = 15000, options = {}) {
   const file = path.join(os.tmpdir(), `wxdl-${Date.now()}-${Math.random().toString(16).slice(2, 8)}.vbs`);
   await fs.writeFile(file, body, 'utf8');
   try {
     await execFileAsync('wscript.exe', ['//nologo', '//B', file, ...args], {
-      windowsHide: true,
-      timeout: 15000,
+      windowsHide: options.hidden !== false,
+      timeout: timeoutMs,
       encoding: 'latin1',
     });
     return true;
   } finally {
     await fs.rm(file, { force: true }).catch(() => undefined);
+  }
+}
+
+/**
+ * Native "browse for folder" dialog, shown by the shell through wscript so no
+ * console window appears. Blocks until the user picks or cancels.
+ */
+const VBS_PICK_FOLDER = String.raw`Option Explicit
+Dim shell, folder, outPath, fso, f, out
+outPath = WScript.Arguments(0)
+Set shell = CreateObject("Shell.Application")
+Set folder = shell.BrowseForFolder(0, "选择视频保存位置", 0)
+out = ""
+If Not folder Is Nothing Then out = folder.Self.Path
+Set fso = CreateObject("Scripting.FileSystemObject")
+Set f = fso.CreateTextFile(outPath, True)
+f.Write out
+f.Close
+`;
+
+async function actionDirPick() {
+  if (!isWindows()) throw new RpcError('unsupported-platform', '目录选择只支持 Windows');
+  const out = path.join(os.tmpdir(), `wxdl-dir-${Date.now()}-${Math.random().toString(16).slice(2, 8)}.txt`);
+  try {
+    await runWscript(VBS_PICK_FOLDER, [out], 180000, { hidden: false });
+    const picked = String(await fs.readFile(out, 'latin1') || '').trim();
+    return { path: picked, cancelled: !picked };
+  } catch (error) {
+    throw new RpcError('dir-pick-failed', `打不开目录选择框：${error?.message || '未知错误'}`);
+  } finally {
+    await fs.rm(out, { force: true }).catch(() => undefined);
   }
 }
 
@@ -1593,6 +1628,7 @@ const ACTIONS = {
   'app.stop': actionAppStop,
   'wechat.restart': actionWechatRestart,
   'clipboard.read': actionClipboardRead,
+  'dir.pick': actionDirPick,
   'app.ensure': actionAppEnsure,
   'app.update': actionAppUpdate,
 };

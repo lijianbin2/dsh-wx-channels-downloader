@@ -148,6 +148,7 @@ window.__ModuleLoader__.load({
       'app.start': 60000,
       'app.restart': 120000,
       'wechat.restart': 60000,
+      'dir.pick': 185000,
       'app.detect': 30000,
       'proxy.start': 20000,
       'proxy.stop': 40000,
@@ -778,27 +779,36 @@ window.__ModuleLoader__.load({
             setEditingDir(true);
           }
 
+          /** Native shell dialog first; the in-app service and typing are fallbacks. */
           async function pickDownloadDir() {
+            setAppBusy(true);
+            try {
+              const chosen = await rpc('dir.pick');
+              if (chosen?.path) {
+                const data = await rpc('settings', { downloadDir: chosen.path });
+                setState(previous => (previous ? { ...previous, settings: { ...previous.settings, ...data.settings } } : previous));
+                setHint({ tone: 'ok', text: t(`以后都下载到 ${chosen.path}`, `Saving to ${chosen.path}`) });
+              }
+              return;
+            } catch (error) {
+              setHint({ tone: 'warn', text: error.message });
+            } finally {
+              if (aliveRef.current) setAppBusy(false);
+            }
+
             const picker = resolveDirectoryPicker();
             if (!picker) {
               editDownloadDirManually();
               return;
             }
-            let picked = null;
             try {
-              picked = await picker.pickDirectory();
-            } catch (error) {
-              setHint({ tone: 'warn', text: t('系统目录选择打不开，直接输入路径也一样', 'The folder picker failed — type the path instead') });
-              editDownloadDirManually();
-              return;
-            }
-            if (!picked) return; // cancelled on purpose
-            try {
+              const picked = await picker.pickDirectory();
+              if (!picked) return;
               const data = await rpc('settings', { downloadDir: picked });
               setState(previous => (previous ? { ...previous, settings: { ...previous.settings, ...data.settings } } : previous));
               setHint({ tone: 'ok', text: t(`以后都下载到 ${picked}`, `Saving to ${picked}`) });
-            } catch (error) {
-              setHint({ tone: 'bad', text: error.message });
+            } catch {
+              editDownloadDirManually();
             }
           }
 
