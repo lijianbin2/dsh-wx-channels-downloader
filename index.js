@@ -1345,6 +1345,12 @@ async function isToolProcessRunning(appPath) {
   return isProcessImageRunning(`${toolImageName(appPath)}.exe`);
 }
 
+/** True when a process with that image name is alive (WMI, no console window). */
+async function isProcessImageRunning(image) {
+  const ids = await queryProcessIds(image);
+  return ids.length > 0;
+}
+
 let idleCloseTimer = null;
 
 /** Keep the downloader warm between downloads, but not forever. */
@@ -1378,7 +1384,7 @@ async function actionAppStart(payload) {
   appStartInFlight = (async () => {
     const settings = await loadSettings();
     let candidate = String(payload?.path ?? settings.appPath ?? '').trim();
-    if (!candidate) throw new RpcError('no-app-path', '还没找到下载器程序，请先在选择窗口里挑一下');
+    if (!candidate) throw new RpcError('no-app-path', '还没找到下载器程序，点一次「下载」我会自动装好');
     let stat = null;
     try {
       stat = await fs.stat(candidate);
@@ -1595,91 +1601,6 @@ function sleepMs(ms) {
 
 /* ------------------------------------------------------------- wechat */
 
-const WECHAT_IMAGES = ['Weixin.exe', 'WeChat.exe', 'WeChatAppEx.exe', 'WeChatPlayer.exe'];
-const WECHAT_CANDIDATES = [
-  'C:\\Program Files\\Tencent\\Weixin\\Weixin.exe',
-  'C:\\Program Files (x86)\\Tencent\\Weixin\\Weixin.exe',
-  'C:\\Program Files\\Tencent\\WeChat\\WeChat.exe',
-  'C:\\Program Files (x86)\\Tencent\\WeChat\\WeChat.exe',
-];
-
-async function isProcessImageRunning(image) {
-  const ids = await queryProcessIds(image);
-  return ids.length > 0;
-}
-
-/**
- * stdout capture is unreliable in some hosts, so the path is written to a file
- * and read back; well-known install locations are the last resort.
- */
-async function findWeChatExecutable() {
-  const scratch = path.join(os.tmpdir(), `wxdl-wechat-${process.pid}.txt`);
-  try {
-    await execFileAsync('powershell.exe', [
-      '-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-Command',
-      `Get-Process -Name Weixin,WeChat -ErrorAction SilentlyContinue | Where-Object { $_.Path } | Select-Object -First 1 -ExpandProperty Path | Set-Content -LiteralPath ${psQuote(scratch)} -Encoding UTF8`,
-    ], { windowsHide: true, timeout: 20000 });
-    const text = String(await fs.readFile(scratch, 'utf8')).trim();
-    if (text) return text;
-  } catch {
-    /* fall through */
-  } finally {
-    await fs.rm(scratch, { force: true }).catch(() => undefined);
-  }
-  for (const candidate of WECHAT_CANDIDATES) {
-    const stat = await fs.stat(candidate).catch(() => null);
-    if (stat?.isFile()) return candidate;
-  }
-  return '';
-}
-
-/**
- * WeChat's webview processes pick their network path when they start, so a
- * window opened before the proxy was on never reaches the interceptor. Putting
- * WeChat back up is the only reliable way to reattach it.
- */
-async function actionWechatRestart() {
-  if (!isWindows()) throw new RpcError('unsupported-platform', '重启微信只支持 Windows');
-  const settings = await loadSettings();
-
-  const running = (await isProcessImageRunning('Weixin.exe')) || (await isProcessImageRunning('WeChat.exe'));
-  const executable = await findWeChatExecutable();
-  if (!running && !executable) {
-    throw new RpcError('wechat-not-found', '没有检测到微信，请先打开微信再点这个按钮');
-  }
-  if (!executable) {
-    throw new RpcError('wechat-path-unknown', '找不到微信的安装位置。可以手动退出微信再重新打开，效果一样。');
-  }
-
-  for (const image of WECHAT_IMAGES) await killProcessImage(image);
-  await sleepMs(2500);
-
-  // Keep the proxy on: the fresh webview must come up through the interceptor.
-  try {
-    const tool = await readToolStatus(settings);
-    const ours = isOurProxyServer((await readProxyState()).server, tool.proxy.addr);
-    if (!ours) {
-      await ensureSnapshot(tool.proxy.addr);
-      const target = proxyHostPort(tool.proxy.addr);
-      if (target) {
-        await writeRegValue('ProxyEnable', '1');
-        await writeRegValue('ProxyServer', `${target.host}:${target.port}`);
-        await notifyProxyChanged();
-      }
-    }
-  } catch {
-    /* proxy handling is best effort here */
-  }
-
-  try {
-    const child = spawn(executable, [], { detached: true, stdio: 'ignore' });
-    child.unref();
-  } catch (error) {
-    throw new RpcError('wechat-start-failed', `微信重启失败：${error?.message || '未知错误'}`);
-  }
-  return { restarted: true, executable };
-}
-
 /* ------------------------------------------------------------ clipboard */
 
 /**
@@ -1687,135 +1608,6 @@ async function actionWechatRestart() {
  * open, which is what makes a freshly started proxy take effect. WeChat itself
  * (Weixin.exe) is never touched.
  */
-/**
- * Opens (or reloads) the Channels page by double-clicking its entry in WeChat's
- * Discover list through UI Automation. That is the step the user does by hand:
- * a fresh page load is what makes the intercepted proxy take effect. PowerShell
- * runs through wscript with a hidden window, so nothing flashes.
- */
-const AUTO_OPEN_PS = String.raw`$ErrorActionPreference = 'Stop'
-$out = $args[0]
-$result = 'unknown'
-try {
-  Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes
-  Add-Type -TypeDefinition @"
-using System;
-using System.Runtime.InteropServices;
-public class WxMouse {
-  [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
-  [DllImport("user32.dll")] public static extern void mouse_event(uint f, uint dx, uint dy, uint d, IntPtr e);
-  [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr h, uint msg, IntPtr w, IntPtr l);
-  [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
-  [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int cmd);
-}
-"@
-  $root = [System.Windows.Automation.AutomationElement]::RootElement
-  $closed = 0
-  foreach ($w in $root.FindAll([System.Windows.Automation.TreeScope]::Children, [System.Windows.Automation.Condition]::TrueCondition)) {
-    try {
-      $cls = $w.Current.ClassName
-      $proc = Get-Process -Id $w.Current.ProcessId -ErrorAction SilentlyContinue
-      if ($proc -and $proc.ProcessName -match 'Weixin|WeChatAppEx' -and $cls -like 'Chrome_WidgetWin*') {
-        $rect = $w.Current.BoundingRectangle
-        if ($rect.Width -gt 200 -and $rect.Height -gt 200) {
-          [WxMouse]::PostMessage([IntPtr]$w.Current.NativeWindowHandle, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero) | Out-Null
-          $closed = $closed + 1
-          Start-Sleep -Milliseconds 250
-        }
-      }
-    } catch { }
-  }
-  $result = 'closed:' + $closed
-  $cond = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::ClassNameProperty, 'mmui::MainWindow')
-  $win = $root.FindFirst([System.Windows.Automation.TreeScope]::Children, $cond)
-  if (-not $win) {
-    $result = 'no-wechat'
-  } else {
-    # Synthetic mouse input only lands on the foreground window.
-    $hwnd = [IntPtr]$win.Current.NativeWindowHandle
-    [WxMouse]::ShowWindow($hwnd, 9) | Out-Null
-    [WxMouse]::SetForegroundWindow($hwnd) | Out-Null
-    Start-Sleep -Milliseconds 450
-    $cellName = [string]::new([char[]]@(0x89C6, 0x9891, 0x53F7))
-    $tabName = [string]::new([char[]]@(0x53D1, 0x73B0))
-    $all = $win.FindAll([System.Windows.Automation.TreeScope]::Descendants, [System.Windows.Automation.Condition]::TrueCondition)
-    $cell = $all | Where-Object { $_.Current.Name -eq $cellName -and $_.Current.ClassName -eq 'mmui::ExtensionDiscoverContentCell' } | Select-Object -First 1
-    if (-not $cell) {
-      $tab = $all | Where-Object { $_.Current.Name -eq $tabName -and $_.Current.ClassName -eq 'mmui::XTabBarItem' } | Select-Object -First 1
-      if ($tab) {
-        $tr = $tab.Current.BoundingRectangle
-        $tx = [int]($tr.X + $tr.Width / 2)
-        $ty = [int]($tr.Y + $tr.Height / 2)
-        [WxMouse]::SetCursorPos($tx, $ty) | Out-Null
-        Start-Sleep -Milliseconds 200
-        [WxMouse]::mouse_event(0x0002, 0, 0, 0, [IntPtr]::Zero); Start-Sleep -Milliseconds 40
-        [WxMouse]::mouse_event(0x0004, 0, 0, 0, [IntPtr]::Zero)
-        Start-Sleep -Milliseconds 1000
-        $all = $win.FindAll([System.Windows.Automation.TreeScope]::Descendants, [System.Windows.Automation.Condition]::TrueCondition)
-        $cell = $all | Where-Object { $_.Current.Name -eq $cellName -and $_.Current.ClassName -eq 'mmui::ExtensionDiscoverContentCell' } | Select-Object -First 1
-      }
-    }
-    if (-not $cell) {
-      $result = 'no-cell'
-    } else {
-      $r = $cell.Current.BoundingRectangle
-      $x = [int]($r.X + $r.Width / 2)
-      $y = [int]($r.Y + $r.Height / 2)
-      [WxMouse]::SetCursorPos($x, $y) | Out-Null
-      Start-Sleep -Milliseconds 200
-      [WxMouse]::mouse_event(0x0002, 0, 0, 0, [IntPtr]::Zero); Start-Sleep -Milliseconds 40
-      [WxMouse]::mouse_event(0x0004, 0, 0, 0, [IntPtr]::Zero); Start-Sleep -Milliseconds 90
-      [WxMouse]::mouse_event(0x0002, 0, 0, 0, [IntPtr]::Zero); Start-Sleep -Milliseconds 40
-      [WxMouse]::mouse_event(0x0004, 0, 0, 0, [IntPtr]::Zero)
-      $result = 'ok:' + $closed
-    }
-  }
-} catch {
-  $result = 'error: ' + $_.Exception.Message
-}
-Set-Content -LiteralPath $out -Value $result -Encoding ascii
-`;
-
-async function actionWechatOpenChannels() {
-  if (!isWindows()) throw new RpcError('unsupported-platform', '自动打开视频号只支持 Windows');
-  const stamp = `${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
-  const script = path.join(os.tmpdir(), `wxdl-open-${stamp}.ps1`);
-  const resultFile = path.join(os.tmpdir(), `wxdl-open-${stamp}.txt`);
-  const runner = path.join(os.tmpdir(), `wxdl-open-${stamp}.vbs`);
-  // PowerShell 5.1 reads a BOM-less UTF-8 file as ANSI; the script is ASCII-only,
-  // but a BOM keeps it readable if someone edits it later.
-  await fs.writeFile(script, AUTO_OPEN_PS, 'utf8');
-  await fs.writeFile(
-    runner,
-    `Set shell = CreateObject("WScript.Shell")\r\nshell.Run "powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File ""${script}"" ""${resultFile}""", 0, True\r\n`,
-    'utf8',
-  );
-  try {
-    await execFileAsync('wscript.exe', ['//nologo', runner], { windowsHide: true, timeout: 30000 });
-    const result = String(await fs.readFile(resultFile, 'utf8') || '').trim();
-    const match = /^ok(?::(\d+))?$/.exec(result);
-    if (!match) {
-      throw new RpcError('open-channels-failed', `自动打开视频号失败：${result || '没有返回结果'}`);
-    }
-    return { opened: true, closedWindows: Number(match[1] || 0) };
-  } finally {
-    await fs.rm(script, { force: true }).catch(() => undefined);
-    await fs.rm(runner, { force: true }).catch(() => undefined);
-    await fs.rm(resultFile, { force: true }).catch(() => undefined);
-  }
-}
-async function actionWechatReloadChannels() {
-  if (!isWindows()) throw new RpcError('unsupported-platform', '重载视频号页面只支持 Windows');
-  const before = (await queryProcessIds('WeChatAppEx.exe')).length;
-  if (before === 0) {
-    return { killed: 0, before: 0, hint: 'no-webview' };
-  }
-  await killProcessImage('WeChatAppEx.exe');
-  await sleepMs(1200);
-  const after = (await queryProcessIds('WeChatAppEx.exe')).length;
-  return { killed: Math.max(0, before - after), before, after };
-}
-
 async function actionClipboardRead() {
   try {
     const electron = await import('electron');
@@ -1879,9 +1671,6 @@ const ACTIONS = {
   'app.restart': actionAppRestart,
   'app.stop': actionAppStop,
   'app.scheduleClose': actionAppScheduleClose,
-  'wechat.restart': actionWechatRestart,
-  'wechat.reloadChannels': actionWechatReloadChannels,
-  'wechat.openChannels': actionWechatOpenChannels,
   'clipboard.read': actionClipboardRead,
   'dir.pick': actionDirPick,
   'app.ensure': actionAppEnsure,

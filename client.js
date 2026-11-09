@@ -60,12 +60,6 @@ window.__ModuleLoader__.load({
 .wxdl-dir-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:10px;font-size:12px;color:var(--wx-muted);min-width:0}
 .wxdl-dir-row>span{flex:0 0 auto}
 .wxdl-dir-row>code{flex:1 1 200px;min-width:0;padding:2px 7px;border-radius:6px;background:var(--wx-soft);color:var(--wx-text);font:12px/1.6 ui-monospace,Consolas,monospace;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;direction:ltr}
-.wxdl-preview{display:flex;gap:12px;margin-top:14px;padding:12px;border:1px solid var(--wx-border);border-radius:10px;min-width:0}
-.wxdl-cover{width:104px;height:58px;flex:0 0 auto;border-radius:7px;object-fit:cover;background:var(--wx-soft)}
-.wxdl-cover-empty{display:flex;align-items:center;justify-content:center;color:var(--wx-muted)}
-.wxdl-preview-body{min-width:0;display:flex;flex-direction:column;gap:3px}
-.wxdl-preview-title{font-size:13px;font-weight:600;line-height:1.5;overflow-wrap:anywhere}
-.wxdl-preview-meta{color:var(--wx-muted);font-size:12px}
 .wxdl-advanced{border-top:1px solid var(--wx-border);padding-top:14px}
 .wxdl-advanced summary{display:flex;align-items:center;gap:7px;cursor:pointer;font-size:12.5px;color:var(--wx-muted);list-style:none}
 .wxdl-advanced summary::-webkit-details-marker{display:none}
@@ -88,7 +82,6 @@ window.__ModuleLoader__.load({
 .wxdl-settings .wxdl-input{min-height:32px;font-size:12px;flex:1 1 220px}
 @keyframes wxdl-spin{to{transform:rotate(360deg)}}
 .wxdl-spin{animation:wxdl-spin 1s linear infinite}
-@media (max-width:700px){.wxdl[data-main="true"]{padding:calc(16px + var(--dsh-frame-top-clearance,0px)) 16px 32px max(16px,var(--dsh-frame-leading-clearance,0px))}.wxdl .wxdl-go{flex:1 1 100%}.wxdl-cover{width:80px;height:45px}}
 `;
 
     function Styles() {
@@ -147,7 +140,6 @@ window.__ModuleLoader__.load({
       'app.update': 240000,
       'app.start': 60000,
       'app.restart': 120000,
-      'wechat.restart': 60000,
       'dir.pick': 185000,
       'app.detect': 30000,
       'proxy.start': 20000,
@@ -202,14 +194,6 @@ window.__ModuleLoader__.load({
       return /^https?:\/\/(weixin\.qq\.com\/sph\/[A-Za-z0-9_-]+|channels\.weixin\.qq\.com\/\S+)/i.test(String(value || '').trim());
     }
 
-    function formatBytes(value) {
-      const bytes = Number(value) || 0;
-      if (!bytes) return '';
-      if (bytes >= 1024 ** 3) return (bytes / 1024 ** 3).toFixed(1) + ' GB';
-      if (bytes >= 1024 ** 2) return (bytes / 1024 ** 2).toFixed(1) + ' MB';
-      if (bytes >= 1024) return (bytes / 1024).toFixed(0) + ' KB';
-      return bytes + ' B';
-    }
 
     function readAutoRestore() {
       try {
