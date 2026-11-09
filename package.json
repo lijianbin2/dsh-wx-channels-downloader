@@ -1,6 +1,6 @@
 {
   "name": "@local/wx-channels-downloader",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "private": true,
   "type": "module",
   "description": "DSH sidebar workbench for the WeChat Channels video downloader.",
@@ -19,7 +19,9 @@
     "README.md"
   ],
   "dsh": {
-    "bundle": { "patch": "./cordis.patch.yml" },
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
     "client": {
       "platform": "web",
       "immediately": true,

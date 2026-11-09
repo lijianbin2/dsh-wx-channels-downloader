@@ -954,17 +954,34 @@ function windowsAssetName(arch) {
   return arch === 'arm64' ? /windows_arm64\.zip$/i : /windows_x86_64\.zip$/i;
 }
 
+async function fetchReleaseJson() {
+  const endpoints = [RELEASES_API, ...DOWNLOAD_MIRRORS.map(base => base + RELEASES_API)];
+  let lastError = null;
+  for (const endpoint of endpoints) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 12000);
+    try {
+      const response = await fetch(endpoint, {
+        headers: { Accept: 'application/vnd.github+json' },
+        signal: controller.signal,
+        cache: 'no-store',
+      });
+      if (!response.ok) throw new RpcError('release-unavailable', `GitHub 返回 ${response.status}`);
+      const json = await response.json();
+      if (json && typeof json === 'object') return json;
+      throw new RpcError('release-unavailable', '版本信息格式异常');
+    } catch (error) {
+      lastError = error?.name === 'AbortError' ? new RpcError('release-timeout', '查询版本超时') : error;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  throw lastError instanceof RpcError ? lastError : new RpcError('release-unavailable', '连不上 GitHub，无法自动检查更新');
+}
+
 async function fetchLatestRelease() {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 15000);
   try {
-    const response = await fetch(RELEASES_API, {
-      headers: { Accept: 'application/vnd.github+json' },
-      signal: controller.signal,
-      cache: 'no-store',
-    });
-    if (!response.ok) throw new RpcError('release-unavailable', `GitHub 返回 ${response.status}`);
-    const release = await response.json();
+    const release = await fetchReleaseJson();
     const tag = normalizeVersion(release?.tag_name);
     if (!tag) throw new RpcError('release-unavailable', '没有拿到版本号');
     const assets = Array.isArray(release?.assets) ? release.assets : [];
@@ -978,10 +995,7 @@ async function fetchLatestRelease() {
     };
   } catch (error) {
     if (error instanceof RpcError) throw error;
-    if (error?.name === 'AbortError') throw new RpcError('release-timeout', '查询版本超时');
     throw new RpcError('release-unavailable', '连不上 GitHub，无法自动检查更新');
-  } finally {
-    clearTimeout(timer);
   }
 }
 
@@ -1028,27 +1042,122 @@ async function findExecutable(dir) {
   return null;
 }
 
+/**
+ * GitHub release downloads are unreliable from mainland China, so the asset is
+ * fetched through mirror prefixes when they are faster. All candidates are
+ * probed in parallel and the quickest one wins — mirrors get a small bonus so
+ * they win ties without penalising a fast direct connection.
+ */
+const DOWNLOAD_MIRRORS = [
+  'https://ghfast.top/',
+  'https://gh-proxy.com/',
+  'https://ghproxy.net/',
+  'https://github.moeyy.xyz/',
+];
+const MIRROR_BONUS_MS = 250;
+const PROBE_TIMEOUT_MS = 6000;
+
+function assetCandidates(url) {
+  const list = DOWNLOAD_MIRRORS.map(base => ({ url: base + url, mirror: true }));
+  list.push({ url, mirror: false });
+  return list;
+}
+
+async function probeUrl(candidate) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), PROBE_TIMEOUT_MS);
+  const started = Date.now();
+  try {
+    const response = await fetch(candidate.url, {
+      method: 'GET',
+      headers: { Range: 'bytes=0-1023' },
+      redirect: 'follow',
+      signal: controller.signal,
+      cache: 'no-store',
+    });
+    if (!response.ok && response.status !== 206) return null;
+    await response.arrayBuffer();
+    const latency = Date.now() - started - (candidate.mirror ? MIRROR_BONUS_MS : 0);
+    return { ...candidate, latency };
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** First candidate that answers wins, so a slow route never delays the others. */
+async function pickFastest(candidates) {
+  return new Promise(resolve => {
+    let settled = false;
+    let pending = candidates.length;
+    const finish = value => {
+      if (settled) return;
+      settled = true;
+      resolve(value);
+    };
+    const deadline = setTimeout(() => finish(null), PROBE_TIMEOUT_MS);
+    for (const candidate of candidates) {
+      probeUrl(candidate)
+        .then(result => {
+          if (result) {
+            clearTimeout(deadline);
+            finish(result);
+          }
+        })
+        .finally(() => {
+          pending -= 1;
+          if (!pending) {
+            clearTimeout(deadline);
+            finish(null);
+          }
+        });
+    }
+  });
+}
+
+async function downloadAsset(url) {
+  const candidates = assetCandidates(url);
+  const fastest = await pickFastest(candidates);
+  const attempts = [];
+  if (fastest) attempts.push(fastest.url);
+  for (const candidate of candidates) {
+    if (!attempts.includes(candidate.url)) attempts.push(candidate.url);
+  }
+
+  let lastError = null;
+  for (const candidate of attempts) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), DOWNLOAD_TIMEOUT_MS);
+    try {
+      const response = await fetch(candidate, { redirect: 'follow', signal: controller.signal });
+      if (!response.ok) throw new RpcError('download-failed', `下载构建包失败（HTTP ${response.status}）`);
+      const data = Buffer.from(await response.arrayBuffer());
+      // A proxy error page is not a zip; check the magic bytes before trusting it.
+      if (data.length < 4 || data[0] !== 0x50 || data[1] !== 0x4b) {
+        throw new RpcError('download-failed', '下载到的不是压缩包（可能被镜像拦截）');
+      }
+      return data;
+    } catch (error) {
+      lastError = error;
+      if (error?.name === 'AbortError') { lastError = new RpcError('download-timeout', '下载构建包超时'); continue; }
+      if (error instanceof RpcError) continue;
+      lastError = new RpcError('download-failed', '下载构建包失败（网络或者被墙）');
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  throw lastError instanceof RpcError ? lastError : new RpcError('download-failed', '下载构建包失败（所有地址都不可用）');
+}
+
 async function downloadAndInstall(release) {
   if (!release.asset?.url) throw new RpcError('no-asset', '这个版本没有 Windows 构建包');
   const arch = process.platform === 'win32' ? 'windows' : 'other';
   if (arch !== 'windows') throw new RpcError('unsupported-platform', '自动安装目前只支持 Windows');
 
   const zipPath = path.join(os.tmpdir(), `wxdl-${release.tag}-${Date.now()}.zip`);
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), DOWNLOAD_TIMEOUT_MS);
-  try {
-    const response = await fetch(release.asset.url, { redirect: 'follow', signal: controller.signal });
-    if (!response.ok) throw new RpcError('download-failed', `下载构建包失败（HTTP ${response.status}）`);
-    const buffer = Buffer.from(await response.arrayBuffer());
-    if (!buffer.length) throw new RpcError('download-failed', '下载到的文件是空的');
-    await fs.writeFile(zipPath, buffer);
-  } catch (error) {
-    if (error instanceof RpcError) throw error;
-    if (error?.name === 'AbortError') throw new RpcError('download-timeout', '下载构建包超时');
-    throw new RpcError('download-failed', '下载构建包失败（网络或者被墙）');
-  } finally {
-    clearTimeout(timer);
-  }
+  const buffer = await downloadAsset(release.asset.url);
+  await fs.writeFile(zipPath, buffer);
 
   const targetDir = path.join(INSTALL_ROOT, release.tag);
   await fs.mkdir(targetDir, { recursive: true });
