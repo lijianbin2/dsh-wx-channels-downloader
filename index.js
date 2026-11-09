@@ -1564,6 +1564,23 @@ async function actionWechatRestart() {
 
 /* ------------------------------------------------------------ clipboard */
 
+/**
+ * Resetting the webview containers re-creates the Channels page on the next
+ * open, which is what makes a freshly started proxy take effect. WeChat itself
+ * (Weixin.exe) is never touched.
+ */
+async function actionWechatReloadChannels() {
+  if (!isWindows()) throw new RpcError('unsupported-platform', '重载视频号页面只支持 Windows');
+  const before = (await queryProcessIds('WeChatAppEx.exe')).length;
+  if (before === 0) {
+    return { killed: 0, before: 0, hint: 'no-webview' };
+  }
+  await killProcessImage('WeChatAppEx.exe');
+  await sleepMs(1200);
+  const after = (await queryProcessIds('WeChatAppEx.exe')).length;
+  return { killed: Math.max(0, before - after), before, after };
+}
+
 async function actionClipboardRead() {
   try {
     const electron = await import('electron');
@@ -1627,6 +1644,7 @@ const ACTIONS = {
   'app.restart': actionAppRestart,
   'app.stop': actionAppStop,
   'wechat.restart': actionWechatRestart,
+  'wechat.reloadChannels': actionWechatReloadChannels,
   'clipboard.read': actionClipboardRead,
   'dir.pick': actionDirPick,
   'app.ensure': actionAppEnsure,

@@ -149,6 +149,7 @@ window.__ModuleLoader__.load({
       'app.restart': 120000,
       'wechat.restart': 60000,
       'dir.pick': 185000,
+      'wechat.reloadChannels': 30000,
       'app.detect': 30000,
       'proxy.start': 20000,
       'proxy.stop': 40000,
@@ -836,6 +837,25 @@ window.__ModuleLoader__.load({
           const proxyActive = Boolean(state?.session?.active);
           const busy = stage === 'preparing' || stage === 'working' || stage === 'waiting' || stage === 'resolving' || stage === 'downloading' || stage === 'previewing';
 
+          /** Lighter than restarting WeChat: reset its webview so Channels reloads. */
+          async function reloadChannels() {
+            setAppBusy(true);
+            setHint({ tone: '', text: t('正在重置微信的网页进程…', 'Resetting WeChat webviews…') });
+            try {
+              const data = await rpc('wechat.reloadChannels');
+              if (data?.before === 0) {
+                setHint({ tone: 'warn', text: t('没有找到微信的网页进程，请直接在微信里点开「视频号」。', 'No WeChat webview found — just open Channels in WeChat.') });
+              } else {
+                setHint({ tone: 'warn', text: t('已重置，现在请在微信里点开「视频号」；面板连上后会自动继续。', 'Reset done — open Channels in WeChat now, this panel continues automatically.') });
+              }
+              await refreshState();
+            } catch (error) {
+              setHint({ tone: 'bad', text: error.message });
+            } finally {
+              if (aliveRef.current) setAppBusy(false);
+            }
+          }
+
           async function restartWechat() {
             setAppBusy(true);
             setHint({ tone: '', text: t('正在重启微信…代理会保持开启，重启后请再点开「视频号」', 'Restarting WeChat — open Channels again when it comes back') });
@@ -949,10 +969,15 @@ window.__ModuleLoader__.load({
                       stage === 'waiting' || stage === 'resolving' || stage === 'downloading'
                         ? h('div', { className: 'wxdl-state-actions' },
                           stage === 'waiting'
-                            ? h('button', {
-                              type: 'button', className: 'wxdl-btn wxdl-btn-sm wxdl-btn-primary',
-                              disabled: appBusy, onClick: restartWechat,
-                            }, h(Glyph, { name: 'refresh', spin: appBusy }), t('重启微信以接入代理', 'Restart WeChat'))
+                            ? h(React.Fragment, null,
+                              h('button', {
+                                type: 'button', className: 'wxdl-btn wxdl-btn-sm wxdl-btn-primary',
+                                disabled: appBusy, onClick: reloadChannels,
+                              }, h(Glyph, { name: 'refresh', spin: appBusy }), t('重载视频号页面', 'Reload Channels page')),
+                              h('button', {
+                                type: 'button', className: 'wxdl-btn wxdl-btn-sm',
+                                disabled: appBusy, onClick: restartWechat,
+                              }, t('重启微信', 'Restart WeChat')))
                             : null,
                           h('button', { type: 'button', className: 'wxdl-btn wxdl-btn-sm', onClick: () => { cancelRef.current = true; setStage('idle'); setHint({ tone: 'warn', text: t('已取消，代理正在还原…', 'Cancelled — restoring the proxy…') }); manualRestore(); } },
                             t('取消', 'Cancel')))
@@ -1048,8 +1073,12 @@ window.__ModuleLoader__.load({
                         ? h('div', { className: 'wxdl-state-actions' },
                           h('button', {
                             type: 'button', className: 'wxdl-btn wxdl-btn-sm wxdl-btn-primary',
+                            disabled: appBusy, onClick: reloadChannels,
+                          }, h(Glyph, { name: 'refresh', spin: appBusy }), t('重载视频号页面', 'Reload Channels page')),
+                          h('button', {
+                            type: 'button', className: 'wxdl-btn wxdl-btn-sm',
                             disabled: appBusy, onClick: restartWechat,
-                          }, h(Glyph, { name: 'refresh', spin: appBusy }), t('重启微信以接入代理', 'Restart WeChat')),
+                          }, t('重启微信', 'Restart WeChat')),
                           h('button', {
                             type: 'button', className: 'wxdl-btn wxdl-btn-sm',
                             onClick: () => { setNeedChannels(false); setHint(null); },
