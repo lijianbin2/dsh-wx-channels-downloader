@@ -149,8 +149,6 @@ window.__ModuleLoader__.load({
       'app.restart': 120000,
       'wechat.restart': 60000,
       'dir.pick': 185000,
-      'wechat.reloadChannels': 30000,
-      'wechat.openChannels': 45000,
       'app.detect': 30000,
       'proxy.start': 20000,
       'proxy.stop': 40000,
@@ -289,19 +287,14 @@ window.__ModuleLoader__.load({
           const [pathDraft, setPathDraft] = React.useState('');
           const [pickingPath, setPickingPath] = React.useState(false);
           const [wedged, setWedged] = React.useState(false);
-          const [needChannels, setNeedChannels] = React.useState(false);
 
           const cancelRef = React.useRef(false);
           const aliveRef = React.useRef(true);
           const autoRestoreRef = React.useRef(autoRestore);
           const closeRef = React.useRef(closeAfterDownload);
-          const previewRef = React.useRef(null);
-          const previewIdleRef = React.useRef(null);
-          const autoOpenedRef = React.useRef(false);
           const flowIdRef = React.useRef(0);
           autoRestoreRef.current = autoRestore;
           closeRef.current = closeAfterDownload;
-          previewRef.current = preview;
 
           React.useEffect(() => () => { aliveRef.current = false; cancelRef.current = true; }, []);
 
@@ -380,15 +373,6 @@ window.__ModuleLoader__.load({
             };
           }, []);
 
-          // Resolve as soon as a link is present, so the title shows before downloading.
-          React.useEffect(() => {
-            const value = link.trim();
-            // Only fire for a complete share link, never while it is still being typed.
-            if (!isChannelsLink(value)) return undefined;
-            if (previewRef.current?.url === value) return undefined;
-            const timer = window.setTimeout(() => { autoPreview(value); }, 900);
-            return () => window.clearTimeout(timer);
-          }, [link]);
 
           const restoreProxy = React.useCallback(async () => {
             try {
@@ -400,36 +384,6 @@ window.__ModuleLoader__.load({
               return { restored: false, error };
             }
           }, [refreshState]);
-
-          async function waitForChannels() {
-            const started = Date.now();
-            autoOpenedRef.current = false;
-            while (Date.now() - started < CHANNELS_WAIT_MS) {
-              if (cancelRef.current) return null;
-              const next = await refreshState();
-              if (next?.tool?.channels?.available) {
-                setNeedChannels(false);
-                return next;
-              }
-              const waited = Date.now() - started;
-              const autoNow = waited > 18000 && !autoOpenedRef.current;
-              if (autoNow) {
-                autoOpenedRef.current = true;
-                rpc('wechat.openChannels').catch(() => undefined);
-              }
-              setNeedChannels(true);
-              setHint({
-                tone: autoNow ? '' : 'warn',
-                text: autoNow
-                  ? t('没有检测到视频号页面，正在用界面自动化帮你双击打开它…', 'No Channels page yet — opening it for you through UI automation…')
-                  : waited < 25000
-                    ? t('现在去微信里打开「视频号」（推荐页就行），连上后我会自动继续…', 'Open Channels in WeChat now — I will continue automatically.')
-                    : t('如果自动打开没成功，点「自动打开视频号」再试一次；实在不行用「重启微信」。', 'If the automatic open did not help, press "Open Channels" once more, or fall back to "Restart WeChat".'),
-              });
-              await sleep(2000);
-            }
-            return null;
-          }
 
           async function waitForTask(id) {
             while (!cancelRef.current) {
@@ -446,79 +400,46 @@ window.__ModuleLoader__.load({
           }
 
           /** Resolve a link: start the downloader, reach the Channels page, read the title. */
+          /**
+           * Resolve a link. If the Channels page is not connected we say so once and
+           * leave the proxy in place, so the user can reopen Channels and press
+           * Download again — no polling, no buttons of ours to press.
+           */
           async function resolveLink(value) {
-            let proxyTouched = false;
-            try {
-              let current = await refreshState();
-              if (!current) throw new Error(t('读取不到插件状态', 'Cannot read plugin state'));
-              if (!current.tool?.running) {
-                current = await ensureAndStart();
-                if (!current?.tool?.running) throw new Error(t('下载器没起来，再点一次试试', 'The downloader is not up — try again'));
-              }
-              if (!current.tool?.channels?.available) {
-                if (!current.session?.active) {
-                  try {
-                    await rpc('proxy.start');
-                    proxyTouched = true;
-                  } catch (error) {
-                    if (error.code === 'proxy-offline' || error.code === 'unsupported-platform') throw error;
-                    proxyTouched = true;
-                  }
-                }
-                setStage('waiting');
-                current = await waitForChannels();
-                if (!current) {
-                  setNeedChannels(true);
-              throw new Error(t('没连上视频号页面。视频号窗口没有关闭按钮，所以请点下面的「重启微信以接入代理」：微信会重启一次（代理保持开启），之后在微信里打开视频号即可。', 'Channels is not connected. Use "Restart WeChat" below — WeChat restarts with the proxy on, then open Channels.'));
-                }
-              }
-              setStage('resolving');
-              try {
-                return await rpc('resolve', { url: value });
-              } catch (error) {
-                // The downloader may have been closed right after the last download.
-                if (error?.code !== 'tool-offline') throw error;
-                const again = await ensureAndStart();
-                if (!again?.tool?.running) throw error;
-                return await rpc('resolve', { url: value });
-              }
-            } finally {
-              if (proxyTouched) await restoreProxy();
+            let current = await refreshState();
+            if (!current) throw new Error(t('读取不到插件状态', 'Cannot read plugin state'));
+            if (!current.tool?.running) {
+              current = await ensureAndStart();
+              if (!current?.tool?.running) throw new Error(t('下载器没起来，再点一次试试', 'The downloader is not up — try again'));
             }
-          }
 
-          /** Resolve the pasted link early so its title is visible before downloading. */
-          async function autoPreview(value) {
-            if (busyRef.current || previewRef.current?.url === value) return;
-            const flowId = ++flowIdRef.current;
-            setStage('previewing');
-            setHint(null);
-            try {
-              const data = await resolveLink(value);
-              if (!aliveRef.current) return;
-              setPreview({ ...data, url: value, resolvedAt: Date.now() });
-              setStage('idle');
-              // Keep the downloader briefly in case the download is next.
-              if (closeRef.current) {
-                if (previewIdleRef.current) window.clearTimeout(previewIdleRef.current);
-                previewIdleRef.current = window.setTimeout(() => {
-                  if (flowIdRef.current === flowId) closeTool();
-                }, 90000);
+            if (!current.tool?.channels?.available) {
+              if (!current.session?.active) {
+                try {
+                  await rpc('proxy.start');
+                } catch (error) {
+                  if (error.code === 'proxy-offline' || error.code === 'unsupported-platform') throw error;
+                }
               }
+              const error = new Error(t(
+                '视频号页面还没连上。代理已开启：请在微信里重新打开一次「视频号」（或退出微信再打开），然后回来重新点「下载」。',
+                'The Channels page is not connected yet. The proxy is on: reopen Channels in WeChat (or restart WeChat), then press Download again.',
+              ));
+              error.code = 'channels-offline';
+              throw error;
+            }
+
+            setStage('resolving');
+            try {
+              return await rpc('resolve', { url: value });
             } catch (error) {
-              if (!aliveRef.current) return;
-              setStage('idle');
-              setPreview(null);
-              if (error?.code === 'rpc-unreachable') {
-                setHint({ tone: 'bad', text: t('插件宿主还没加载，请重启一次 DSH。', 'Restart DSH once to load the updated plugin host.') });
-              } else if (error?.code === 'tool-offline' || error?.code === 'channels-offline' || /视频号|下载器/.test(error?.message || '')) {
-                setHint({ tone: 'warn', text: t('暂时读不到标题：点「下载」时我会自动接入并把标题显示出来。', 'Cannot read the title yet — downloading will set it up automatically.') });
-              } else {
-                setHint({ tone: 'warn', text: error?.message || '' });
-              }
+              // The downloader may have been closed right after the last download.
+              if (error?.code !== 'tool-offline') throw error;
+              const again = await ensureAndStart();
+              if (!again?.tool?.running) throw error;
+              return await rpc('resolve', { url: value });
             }
           }
-
           async function runFlow() {
             const flowId = ++flowIdRef.current;
             const value = link.trim();
@@ -527,34 +448,18 @@ window.__ModuleLoader__.load({
               return;
             }
             cancelRef.current = false;
-            if (previewIdleRef.current) { window.clearTimeout(previewIdleRef.current); previewIdleRef.current = null; }
             setHint(null);
             setResult(null);
             setProgress(0);
+            setPreview(null);
             setStage('working');
 
             let completed = false;
             try {
-              // Media URLs carry a short-lived signature, so an old preview is re-resolved.
-              const cached = previewRef.current && previewRef.current.url === value ? previewRef.current : null;
-              let resolved = cached && Date.now() - (cached.resolvedAt || 0) < 180000 ? cached : null;
-              if (!resolved) {
-                const fresh = await resolveLink(value);
-                if (!aliveRef.current) return;
-                resolved = { ...fresh, url: value, resolvedAt: Date.now() };
-                setPreview(resolved);
-              }
-
-              // A cached preview skips the resolve step, so the downloader may have
-              // been closed after the previous download: bring it back first.
-              let live = await refreshState();
-              if (!live?.tool?.running) {
-                setStage('working');
-                live = await ensureAndStart();
-                if (!live?.tool?.running) {
-                  throw new Error(t('下载器没能启动，请再点一次下载。', 'The downloader did not start — try again.'));
-                }
-              }
+              const fresh = await resolveLink(value);
+              if (!aliveRef.current) return;
+              const resolved = { ...fresh, url: value };
+              setPreview(resolved);
 
               setStage('downloading');
               const created = await rpc('download', { object: resolved.object, title: resolved.title, downloadDir: state?.settings?.downloadDir || '' });
@@ -584,6 +489,8 @@ window.__ModuleLoader__.load({
               if (!aliveRef.current) return;
               if (error?.code === 'rpc-unreachable') {
                 setHint({ tone: 'bad', text: t('插件宿主还没加载，请重启一次 DSH。', 'Restart DSH once to load the updated plugin host.') });
+              } else if (error?.code === 'channels-offline') {
+                setHint({ tone: 'warn', text: error.message });
               } else {
                 setHint({ tone: 'bad', text: error?.message || t('出错了', 'Something went wrong') });
               }
@@ -846,55 +753,9 @@ window.__ModuleLoader__.load({
           const running = Boolean(state?.tool?.running);
           const channelsReady = Boolean(state?.tool?.channels?.available);
           const proxyActive = Boolean(state?.session?.active);
-          const busy = stage === 'preparing' || stage === 'working' || stage === 'waiting' || stage === 'resolving' || stage === 'downloading' || stage === 'previewing';
+          const busy = stage === 'preparing' || stage === 'working' || stage === 'resolving' || stage === 'downloading';
 
           /** Lighter than restarting WeChat: reset its webview so Channels reloads. */
-          /** Double-clicks the Channels entry in WeChat via UI Automation. */
-          async function openChannels() {
-            setAppBusy(true);
-            setHint({ tone: '', text: t('正在打开视频号…', 'Opening Channels…') });
-            try {
-              await rpc('wechat.openChannels');
-              setHint({ tone: 'warn', text: t('已帮你打开视频号，等它加载完就会自动继续。', 'Channels opened — waiting for it to load.') });
-              await refreshState();
-            } catch (error) {
-              setHint({ tone: 'bad', text: error.message });
-            } finally {
-              if (aliveRef.current) setAppBusy(false);
-            }
-          }
-
-          async function reloadChannels() {
-            setAppBusy(true);
-            setHint({ tone: '', text: t('正在重置微信的网页进程…', 'Resetting WeChat webviews…') });
-            try {
-              const data = await rpc('wechat.reloadChannels');
-              if (data?.before === 0) {
-                setHint({ tone: 'warn', text: t('没有找到微信的网页进程，请直接在微信里点开「视频号」。', 'No WeChat webview found — just open Channels in WeChat.') });
-              } else {
-                setHint({ tone: 'warn', text: t('已重置，现在请在微信里点开「视频号」；面板连上后会自动继续。', 'Reset done — open Channels in WeChat now, this panel continues automatically.') });
-              }
-              await refreshState();
-            } catch (error) {
-              setHint({ tone: 'bad', text: error.message });
-            } finally {
-              if (aliveRef.current) setAppBusy(false);
-            }
-          }
-
-          async function restartWechat() {
-            setAppBusy(true);
-            setHint({ tone: '', text: t('正在重启微信…代理会保持开启，重启后请再点开「视频号」', 'Restarting WeChat — open Channels again when it comes back') });
-            try {
-              await rpc('wechat.restart');
-              setHint({ tone: 'warn', text: t('微信已重启。请点开「视频号」（推荐页就行）；如果要求确认登录，先登录。连上后我会自动继续。', 'WeChat restarted. Open Channels again (sign in first if asked) and I will continue.') });
-            } catch (error) {
-              setHint({ tone: 'bad', text: error.message });
-            } finally {
-              if (aliveRef.current) setAppBusy(false);
-            }
-          }
-
           async function restartDownloader() {
             setAppBusy(true);
             setHint({ tone: '', text: t('正在重启下载器…会弹一次 UAC，请点允许', 'Restarting the downloader — allow the UAC prompt') });
@@ -921,9 +782,7 @@ window.__ModuleLoader__.load({
             if (stage === 'done') return { tone: 'ok', icon: 'check', text: null };
             if (stage === 'preparing') return { tone: '', icon: 'spinner', text: t('正在后台准备下载器（不会开窗口）…', 'Preparing the downloader in the background…') };
             if (stage === 'downloading') return { tone: '', icon: 'spinner', text: t('正在下载…', 'Downloading…') };
-            if (stage === 'waiting') return { tone: 'warn', icon: 'spinner', text: t('代理已开启，等微信里的视频号页面连上来…', 'Proxy is on — waiting for the Channels page in WeChat…') };
             if (stage === 'resolving') return { tone: '', icon: 'spinner', text: t('正在解析链接…', 'Resolving the link…') };
-            if (stage === 'previewing') return { tone: '', icon: 'spinner', text: t('正在读取标题…', 'Reading the title…') };
             if (stage === 'working') return { tone: '', icon: 'spinner', text: t('准备中…', 'Preparing…') };
             if (!state) return { tone: '', icon: 'spinner', text: t('读取状态…', 'Reading status…') };
             if (!running && pickingPath) return { tone: 'warn', icon: 'warning', text: t('没自动找到下载器。把它 .exe 的完整路径贴进来，例如 D:\\Software\\wx_video_download\\wx_video_download.exe', 'Downloader not found automatically. Paste its full .exe path.') };
@@ -992,19 +851,8 @@ window.__ModuleLoader__.load({
                     h('div', { className: 'wxdl-state-body' },
                       h('span', null, status.text),
                       stage === 'downloading' ? h('div', { className: 'wxdl-bar' }, h('i', { style: { width: Math.max(2, progress) + '%' } })) : null,
-                      stage === 'waiting' || stage === 'resolving' || stage === 'downloading'
+                      stage === 'resolving' || stage === 'downloading'
                         ? h('div', { className: 'wxdl-state-actions' },
-                          stage === 'waiting'
-                            ? h(React.Fragment, null,
-                              h('button', {
-                                type: 'button', className: 'wxdl-btn wxdl-btn-sm wxdl-btn-primary',
-                                disabled: appBusy, onClick: openChannels,
-                              }, h(Glyph, { name: 'refresh', spin: appBusy }), t('自动打开视频号', 'Open Channels')),
-                              h('button', {
-                                type: 'button', className: 'wxdl-btn wxdl-btn-sm',
-                                disabled: appBusy, onClick: restartWechat,
-                              }, t('重启微信', 'Restart WeChat')))
-                            : null,
                           h('button', { type: 'button', className: 'wxdl-btn wxdl-btn-sm', onClick: () => { cancelRef.current = true; setStage('idle'); setHint({ tone: 'warn', text: t('已取消，代理正在还原…', 'Cancelled — restoring the proxy…') }); manualRestore(); } },
                             t('取消', 'Cancel')))
                         : null,
@@ -1094,22 +942,7 @@ window.__ModuleLoader__.load({
                   ? h('div', { className: 'wxdl-state', 'data-tone': hint.tone, role: hint.tone === 'bad' ? 'alert' : 'status' },
                     h(Glyph, { name: hint.tone === 'bad' ? 'warning' : hint.tone === 'ok' ? 'check' : 'warning' }),
                     h('div', { className: 'wxdl-state-body' },
-                      h('span', null, hint.text),
-                      needChannels && stage !== 'waiting'
-                        ? h('div', { className: 'wxdl-state-actions' },
-                          h('button', {
-                            type: 'button', className: 'wxdl-btn wxdl-btn-sm wxdl-btn-primary',
-                            disabled: appBusy, onClick: openChannels,
-                          }, h(Glyph, { name: 'refresh', spin: appBusy }), t('自动打开视频号', 'Open Channels')),
-                          h('button', {
-                            type: 'button', className: 'wxdl-btn wxdl-btn-sm',
-                            disabled: appBusy, onClick: restartWechat,
-                          }, t('重启微信', 'Restart WeChat')),
-                          h('button', {
-                            type: 'button', className: 'wxdl-btn wxdl-btn-sm',
-                            onClick: () => { setNeedChannels(false); setHint(null); },
-                          }, t('忽略', 'Dismiss')))
-                        : null))
+                      h('span', null, hint.text)))
                   : null,
 
                 unguarded
