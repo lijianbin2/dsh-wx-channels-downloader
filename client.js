@@ -414,6 +414,18 @@ window.__ModuleLoader__.load({
             }
 
             if (!current.tool?.channels?.available) {
+              // A freshly started downloader needs a few seconds before the open
+              // Channels page reconnects its websocket, so wait briefly first.
+              const deadline = Date.now() + 9000;
+              while (Date.now() < deadline && !current.tool?.channels?.available) {
+                await sleep(800);
+                if (!aliveRef.current) return null;
+                const next = await refreshState();
+                if (next) current = next;
+              }
+            }
+
+            if (!current.tool?.channels?.available) {
               if (!current.session?.active) {
                 try {
                   await rpc('proxy.start');
@@ -497,7 +509,7 @@ window.__ModuleLoader__.load({
               setStage('idle');
             } finally {
               if (!aliveRef.current) return;
-              if (completed && closeRef.current && flowId === flowIdRef.current) await closeTool();
+              if (completed && closeRef.current && flowId === flowIdRef.current) await rpc('app.scheduleClose', { minutes: 5 }).catch(() => undefined);
             }
           }
 
@@ -994,7 +1006,7 @@ window.__ModuleLoader__.load({
                       onChange: event => { setCloseAfterDownload(event.target.checked); writeCloseAfterDownload(event.target.checked); },
                     }),
                     h('i', { 'aria-hidden': 'true' }),
-                    h('span', null, t('下载完成后关闭下载器', 'Stop the downloader when done'))),
+                    h('span', null, t('下载完成后空闲 5 分钟自动关闭', 'Stop the downloader after 5 idle minutes'))),
                   h('div', { className: 'wxdl-advanced-actions' },
                     h('button', { type: 'button', className: 'wxdl-btn wxdl-btn-sm', disabled: busy || !proxyActive, onClick: manualRestore },
                       h(Glyph, { name: 'shield' }), t('立即还原代理', 'Restore now')),

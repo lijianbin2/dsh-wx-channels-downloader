@@ -604,6 +604,7 @@ async function actionProxyStop() {
 }
 
 async function actionResolve(payload) {
+  cancelIdleClose();
   const url = String(payload?.url ?? '').trim();
   if (!url) throw new RpcError('bad-request', '请先粘贴视频号链接');
   if (!/^https?:\/\//i.test(url)) throw new RpcError('bad-link', '链接需要以 http(s):// 开头');
@@ -676,6 +677,7 @@ function cleanFilename(raw) {
 }
 
 async function actionDownload(payload) {
+  cancelIdleClose();
   const object = payload?.object;
   if (!object || typeof object !== 'object') throw new RpcError('bad-request', '缺少解析结果，请先解析链接');
   const settings = await loadSettings();
@@ -1343,19 +1345,57 @@ async function isToolProcessRunning(appPath) {
   return isProcessImageRunning(`${toolImageName(appPath)}.exe`);
 }
 
+let idleCloseTimer = null;
+
+/** Keep the downloader warm between downloads, but not forever. */
+function scheduleIdleClose(minutes) {
+  if (idleCloseTimer) clearTimeout(idleCloseTimer);
+  const delay = Math.max(1, Math.min(120, Number(minutes) || 5)) * 60 * 1000;
+  idleCloseTimer = setTimeout(() => {
+    idleCloseTimer = null;
+    actionAppStop().catch(() => undefined);
+  }, delay);
+  return delay;
+}
+
+function cancelIdleClose() {
+  if (idleCloseTimer) {
+    clearTimeout(idleCloseTimer);
+    idleCloseTimer = null;
+  }
+}
+
+async function actionAppScheduleClose(payload) {
+  const minutes = scheduleIdleClose(payload?.minutes ?? 5);
+  return { closesInMinutes: Math.round(minutes / 60000) };
+}
+
 let appStartInFlight = null;
 
 async function actionAppStart(payload) {
+  cancelIdleClose();
   if (appStartInFlight) return appStartInFlight;
   appStartInFlight = (async () => {
     const settings = await loadSettings();
-    const candidate = String(payload?.path ?? settings.appPath ?? '').trim();
+    let candidate = String(payload?.path ?? settings.appPath ?? '').trim();
     if (!candidate) throw new RpcError('no-app-path', '还没找到下载器程序，请先在选择窗口里挑一下');
     let stat = null;
     try {
       stat = await fs.stat(candidate);
     } catch {
       stat = null;
+    }
+    if (!stat?.isFile()) {
+      // The configured build disappeared: install a fresh managed copy instead.
+      try {
+        const info = await actionAppUpdate();
+        if (info?.appPath) {
+          candidate = info.appPath;
+          stat = await fs.stat(candidate).catch(() => null);
+        }
+      } catch {
+        /* fall through to the error below */
+      }
     }
     if (!stat?.isFile()) throw new RpcError('bad-app-path', '这个路径下没有可执行文件');
     await saveSettings({ appPath: candidate });
@@ -1389,6 +1429,7 @@ async function actionAppStart(payload) {
         stdio: 'ignore',
         cwd: path.dirname(candidate),
         windowsHide: true,
+        env: childEnv(),
       });
       child.on('error', () => {});
       child.unref();
@@ -1413,6 +1454,7 @@ async function actionAppStart(payload) {
         stdio: 'ignore',
         cwd: path.dirname(candidate),
         windowsHide: true,
+        env: childEnv(),
       });
       retry.on('error', () => {});
       retry.unref();
@@ -1483,6 +1525,18 @@ async function actionAppRestart() {
     return { ...(await actionAppStart({ path: candidate })), restarted: true };
   }
   throw new RpcError('app-restart-failed', '下载器还在运行，无法重启（可能以管理员身份启动，请手动关闭它的窗口）。');
+}
+
+/**
+ * Windows PowerShell 5.1 cannot autoload its modules when it inherits a
+ * PSModulePath written by PowerShell 7 (which is what DSH passes down): the
+ * Cert: drive disappears and the downloader's certificate check fails. Every
+ * child process that may run PowerShell gets a cleaned environment.
+ */
+function childEnv() {
+  const env = { ...process.env };
+  delete env.PSModulePath;
+  return env;
 }
 
 function sleepMs(ms) {
@@ -1774,6 +1828,7 @@ const ACTIONS = {
   'app.start': actionAppStart,
   'app.restart': actionAppRestart,
   'app.stop': actionAppStop,
+  'app.scheduleClose': actionAppScheduleClose,
   'wechat.restart': actionWechatRestart,
   'wechat.reloadChannels': actionWechatReloadChannels,
   'wechat.openChannels': actionWechatOpenChannels,
