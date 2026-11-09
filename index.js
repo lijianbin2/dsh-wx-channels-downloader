@@ -468,13 +468,27 @@ async function buildState(ctx) {
       settings.appVersion = runningVersion;
     }
   }
-  const system = await readProxyState();
+  let system = await readProxyState();
   let snapshot = await loadSnapshot();
   // A session exists only while the registry actually points at the downloader;
   // otherwise it was already restored and a stale record would block the next run.
   if (snapshot && system.supported && !isOurProxyServer(system.server, snapshot.ourAddr || '127.0.0.1:2023')) {
     await saveSnapshot(null).catch(() => undefined);
     snapshot = null;
+  }
+  // The proxy must never be left pointing at a downloader that is not running:
+  // WeChat's built-in browser would fail with ERR_PROXY_CONNECTION_FAILED.
+  if (system.supported && !tool.running && isOurProxyServer(system.server, '127.0.0.1:2023')) {
+    const done = snapshot ? await restoreSnapshot().catch(() => ({ restored: false })) : { restored: false };
+    if (!done.restored && settings.lastGoodProxy?.values) {
+      for (const name of PROXY_VALUE_NAMES) {
+        await writeRegValue(name, settings.lastGoodProxy.values[name] ?? null).catch(() => undefined);
+      }
+      await notifyProxyChanged();
+    }
+    await saveSnapshot(null).catch(() => undefined);
+    snapshot = null;
+    system = await readProxyState();
   }
   // While the downloader is stopped the registry holds the user's own proxy.
   // Remember it, so a takeover that happens before we snapshot can still be undone.

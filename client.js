@@ -597,6 +597,9 @@ window.__ModuleLoader__.load({
           /** Nothing should stay resident: stop the downloader once the work is done. */
           async function closeTool() {
             try {
+              // Never stop the downloader while the system proxy still points at it:
+              // WeChat's built-in browser would then fail with ERR_PROXY_CONNECTION_FAILED.
+              if (state?.session?.active) await rpc('proxy.stop').catch(() => undefined);
               const data = await rpc('app.stop');
               if (data?.needsElevation && aliveRef.current) {
                 setHint({
