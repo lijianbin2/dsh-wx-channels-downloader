@@ -1600,14 +1600,38 @@ using System.Runtime.InteropServices;
 public class WxMouse {
   [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
   [DllImport("user32.dll")] public static extern void mouse_event(uint f, uint dx, uint dy, uint d, IntPtr e);
+  [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr h, uint msg, IntPtr w, IntPtr l);
+  [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
+  [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int cmd);
 }
 "@
   $root = [System.Windows.Automation.AutomationElement]::RootElement
+  $closed = 0
+  foreach ($w in $root.FindAll([System.Windows.Automation.TreeScope]::Children, [System.Windows.Automation.Condition]::TrueCondition)) {
+    try {
+      $cls = $w.Current.ClassName
+      $proc = Get-Process -Id $w.Current.ProcessId -ErrorAction SilentlyContinue
+      if ($proc -and $proc.ProcessName -match 'Weixin|WeChatAppEx' -and $cls -like 'Chrome_WidgetWin*') {
+        $rect = $w.Current.BoundingRectangle
+        if ($rect.Width -gt 200 -and $rect.Height -gt 200) {
+          [WxMouse]::PostMessage([IntPtr]$w.Current.NativeWindowHandle, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero) | Out-Null
+          $closed = $closed + 1
+          Start-Sleep -Milliseconds 250
+        }
+      }
+    } catch { }
+  }
+  $result = 'closed:' + $closed
   $cond = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::ClassNameProperty, 'mmui::MainWindow')
   $win = $root.FindFirst([System.Windows.Automation.TreeScope]::Children, $cond)
   if (-not $win) {
     $result = 'no-wechat'
   } else {
+    # Synthetic mouse input only lands on the foreground window.
+    $hwnd = [IntPtr]$win.Current.NativeWindowHandle
+    [WxMouse]::ShowWindow($hwnd, 9) | Out-Null
+    [WxMouse]::SetForegroundWindow($hwnd) | Out-Null
+    Start-Sleep -Milliseconds 450
     $cellName = [string]::new([char[]]@(0x89C6, 0x9891, 0x53F7))
     $tabName = [string]::new([char[]]@(0x53D1, 0x73B0))
     $all = $win.FindAll([System.Windows.Automation.TreeScope]::Descendants, [System.Windows.Automation.Condition]::TrueCondition)
@@ -1615,9 +1639,14 @@ public class WxMouse {
     if (-not $cell) {
       $tab = $all | Where-Object { $_.Current.Name -eq $tabName -and $_.Current.ClassName -eq 'mmui::XTabBarItem' } | Select-Object -First 1
       if ($tab) {
-        $inv = $null
-        if ($tab.TryGetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern, [ref]$inv)) { $inv.Invoke() }
-        Start-Sleep -Milliseconds 700
+        $tr = $tab.Current.BoundingRectangle
+        $tx = [int]($tr.X + $tr.Width / 2)
+        $ty = [int]($tr.Y + $tr.Height / 2)
+        [WxMouse]::SetCursorPos($tx, $ty) | Out-Null
+        Start-Sleep -Milliseconds 200
+        [WxMouse]::mouse_event(0x0002, 0, 0, 0, [IntPtr]::Zero); Start-Sleep -Milliseconds 40
+        [WxMouse]::mouse_event(0x0004, 0, 0, 0, [IntPtr]::Zero)
+        Start-Sleep -Milliseconds 1000
         $all = $win.FindAll([System.Windows.Automation.TreeScope]::Descendants, [System.Windows.Automation.Condition]::TrueCondition)
         $cell = $all | Where-Object { $_.Current.Name -eq $cellName -and $_.Current.ClassName -eq 'mmui::ExtensionDiscoverContentCell' } | Select-Object -First 1
       }
@@ -1634,7 +1663,7 @@ public class WxMouse {
       [WxMouse]::mouse_event(0x0004, 0, 0, 0, [IntPtr]::Zero); Start-Sleep -Milliseconds 90
       [WxMouse]::mouse_event(0x0002, 0, 0, 0, [IntPtr]::Zero); Start-Sleep -Milliseconds 40
       [WxMouse]::mouse_event(0x0004, 0, 0, 0, [IntPtr]::Zero)
-      $result = 'ok'
+      $result = 'ok:' + $closed
     }
   }
 } catch {
@@ -1660,10 +1689,11 @@ async function actionWechatOpenChannels() {
   try {
     await execFileAsync('wscript.exe', ['//nologo', runner], { windowsHide: true, timeout: 30000 });
     const result = String(await fs.readFile(resultFile, 'utf8') || '').trim();
-    if (result !== 'ok') {
+    const match = /^ok(?::(\d+))?$/.exec(result);
+    if (!match) {
       throw new RpcError('open-channels-failed', `自动打开视频号失败：${result || '没有返回结果'}`);
     }
-    return { opened: true };
+    return { opened: true, closedWindows: Number(match[1] || 0) };
   } finally {
     await fs.rm(script, { force: true }).catch(() => undefined);
     await fs.rm(runner, { force: true }).catch(() => undefined);
