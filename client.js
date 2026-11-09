@@ -812,11 +812,8 @@ window.__ModuleLoader__.load({
                   h('div', null,
                     h('h1', null, t('视频号下载器', 'Channels downloader')),
                     h('p', { className: 'wxdl-sub' }, t('贴链接 → 点下载 → 全自动，代理会自动还原', 'Paste, click, done — the proxy restores itself')))),
-                h('div', { style: { display: 'flex', gap: '8px' } },
-                  h('button', {
-                    type: 'button', className: 'wxdl-btn wxdl-btn-sm', disabled: busy,
-                    onClick: () => { setBootError(null); refreshState(); },
-                  }, h(Glyph, { name: 'refresh' }), t('刷新', 'Refresh')))),
+                ),
+
 
               h('div', { className: 'wxdl-main' },
                 h('div', { className: 'wxdl-input-row' },
@@ -936,8 +933,8 @@ window.__ModuleLoader__.load({
                             },
                           }, h(Glyph, { name: 'folder' }), t('打开文件夹', 'Open folder'))
                           : null,
-                        h('button', { type: 'button', className: 'wxdl-btn wxdl-btn-sm', onClick: () => { setStage('idle'); setResult(null); setPreview(null); setLink(''); setHint(null); } },
-                          t('再下一个', 'Download another')))))
+                        )))
+
                   : null,
 
                 preview && stage !== 'done'
