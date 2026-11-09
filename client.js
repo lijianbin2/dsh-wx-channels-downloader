@@ -650,7 +650,7 @@ window.__ModuleLoader__.load({
               }
               const live = await waitUntilRunning(45000);
               if (!live) {
-                setHint({ tone: 'bad', text: t('下载器没能启动。请手动右键「以管理员身份运行」它一次，然后点刷新。', 'The downloader did not start. Run it once as administrator, then refresh.') });
+                setHint({ tone: 'bad', text: t('下载器没能启动。请手动右键「以管理员身份运行」它一次，然后再点一次下载。', 'The downloader did not start. Run it once as administrator, then press Download again.') });
               }
               return live;
             } catch (error) {
