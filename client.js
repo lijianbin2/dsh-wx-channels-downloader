@@ -758,21 +758,41 @@ window.__ModuleLoader__.load({
             }
           }
 
+          function resolveDirectoryPicker() {
+            const candidates = [];
+            try {
+              if (typeof ctx.get === 'function') candidates.push(ctx.get('uiWorkspace'));
+            } catch {
+              /* service lookup can throw when it is not mounted */
+            }
+            try {
+              candidates.push(ctx.uiWorkspace);
+            } catch {
+              /* ignore */
+            }
+            return candidates.find(item => item && typeof item.pickDirectory === 'function') || null;
+          }
+
+          function editDownloadDirManually() {
+            setDirDraft(state?.settings?.downloadDir || '');
+            setEditingDir(true);
+          }
+
           async function pickDownloadDir() {
-            const picker = (typeof ctx.get === 'function' ? ctx.get('uiWorkspace') : undefined) ?? ctx.uiWorkspace;
-            if (typeof picker?.pickDirectory !== 'function') {
-              // No native picker in this build: fall back to typing the path.
-              setDirDraft(state?.settings?.downloadDir || '');
-              setEditingDir(true);
+            const picker = resolveDirectoryPicker();
+            if (!picker) {
+              editDownloadDirManually();
               return;
             }
             let picked = null;
             try {
               picked = await picker.pickDirectory();
-            } catch {
-              picked = null;
+            } catch (error) {
+              setHint({ tone: 'warn', text: t('系统目录选择打不开，直接输入路径也一样', 'The folder picker failed — type the path instead') });
+              editDownloadDirManually();
+              return;
             }
-            if (!picked) return;
+            if (!picked) return; // cancelled on purpose
             try {
               const data = await rpc('settings', { downloadDir: picked });
               setState(previous => (previous ? { ...previous, settings: { ...previous.settings, ...data.settings } } : previous));
@@ -898,7 +918,11 @@ window.__ModuleLoader__.load({
                     h('code', { title: state?.settings?.downloadDir || '' }, state?.settings?.downloadDir || t('读取中…', 'loading…')),
                     h('button', {
                       type: 'button', className: 'wxdl-btn wxdl-btn-sm', disabled: busy, onClick: pickDownloadDir,
-                    }, h(Glyph, { name: 'folder' }), t('更改', 'Change'))),
+                    }, h(Glyph, { name: 'folder' }), t('更改', 'Change')),
+                    h('button', {
+                      type: 'button', className: 'wxdl-btn wxdl-btn-sm wxdl-btn-ghost', disabled: busy, onClick: editDownloadDirManually,
+                      title: t('直接输入路径', 'Type the path'),
+                    }, t('手填', 'Type'))),
 
                 status.text
                   ? h('div', { className: 'wxdl-state', 'data-tone': status.tone, role: status.tone === 'bad' ? 'alert' : 'status' },
