@@ -287,6 +287,7 @@ window.__ModuleLoader__.load({
           const [pathDraft, setPathDraft] = React.useState('');
           const [pickingPath, setPickingPath] = React.useState(false);
           const [wedged, setWedged] = React.useState(false);
+          const [needChannels, setNeedChannels] = React.useState(false);
 
           const cancelRef = React.useRef(false);
           const aliveRef = React.useRef(true);
@@ -402,15 +403,19 @@ window.__ModuleLoader__.load({
             while (Date.now() - started < CHANNELS_WAIT_MS) {
               if (cancelRef.current) return null;
               const next = await refreshState();
-              if (next?.tool?.channels?.available) return next;
+              if (next?.tool?.channels?.available) {
+                setNeedChannels(false);
+                return next;
+              }
               const waited = Date.now() - started;
               // WeChat's webview processes fix their network path when they start,
               // so a Channels window opened before the proxy was on stays direct.
+              setNeedChannels(true);
               setHint({
                 tone: 'warn',
                 text: waited < 25000
                   ? t('现在去微信里打开「视频号」（推荐页就行），连上后我会自动继续…', 'Open Channels in WeChat now — I will continue automatically.')
-                  : t('如果视频号已经开着，把它关掉再重新打开一次；微信的网页进程只在启动时读取代理设置，重启视频号窗口才会走代理。', 'If Channels is already open, close and reopen that window — WeChat reads the proxy only when its webview starts.'),
+                  : t('视频号窗口没有关闭按钮也没关系：点下面的「重启微信以接入代理」，我会把微信退出再重新打开（代理保持开启），然后你在微信里点开视频号就行。', 'No close button on that window? Use "Restart WeChat" below — I relaunch WeChat with the proxy still on, then just open Channels again.'),
               });
               await sleep(2000);
             }
@@ -454,7 +459,8 @@ window.__ModuleLoader__.load({
                 setStage('waiting');
                 current = await waitForChannels();
                 if (!current) {
-                  throw new Error(t('没连上视频号页面。先在微信里打开「视频号」，或点「重启微信以接入代理」再试。', 'The Channels page is not connected yet'));
+                  setNeedChannels(true);
+              throw new Error(t('没连上视频号页面。视频号窗口没有关闭按钮，所以请点下面的「重启微信以接入代理」：微信会重启一次（代理保持开启），之后在微信里打开视频号即可。', 'Channels is not connected. Use "Restart WeChat" below — WeChat restarts with the proxy on, then open Channels.'));
                 }
               }
               setStage('resolving');
@@ -1036,7 +1042,19 @@ window.__ModuleLoader__.load({
                 hint
                   ? h('div', { className: 'wxdl-state', 'data-tone': hint.tone, role: hint.tone === 'bad' ? 'alert' : 'status' },
                     h(Glyph, { name: hint.tone === 'bad' ? 'warning' : hint.tone === 'ok' ? 'check' : 'warning' }),
-                    h('div', { className: 'wxdl-state-body' }, h('span', null, hint.text)))
+                    h('div', { className: 'wxdl-state-body' },
+                      h('span', null, hint.text),
+                      needChannels && stage !== 'waiting'
+                        ? h('div', { className: 'wxdl-state-actions' },
+                          h('button', {
+                            type: 'button', className: 'wxdl-btn wxdl-btn-sm wxdl-btn-primary',
+                            disabled: appBusy, onClick: restartWechat,
+                          }, h(Glyph, { name: 'refresh', spin: appBusy }), t('重启微信以接入代理', 'Restart WeChat')),
+                          h('button', {
+                            type: 'button', className: 'wxdl-btn wxdl-btn-sm',
+                            onClick: () => { setNeedChannels(false); setHint(null); },
+                          }, t('忽略', 'Dismiss')))
+                        : null))
                   : null,
 
                 unguarded
