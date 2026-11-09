@@ -1421,6 +1421,9 @@ async function actionAppStart(payload) {
     // download runs, and the plugin closes it afterwards. Console children of the
     // downloader (it runs reg.exe for the proxy) inherit it instead of flashing.
     try {
+      await patchToolProxyConfig(candidate).catch(() => undefined);
+      const launched = await waitForToolApi(settings, 8000);
+      if (launched) await tameToolProxyControl(candidate, settings);
       // CREATE_NO_WINDOW: the downloader gets a console but no window, and its
       // own console children (reg.exe while it sets the proxy) inherit that
       // hidden console instead of opening their own.
@@ -1433,7 +1436,7 @@ async function actionAppStart(payload) {
       });
       child.on('error', () => {});
       child.unref();
-      if (await waitForToolApi(settings, 8000)) {
+      if (launched) {
         return { started: true, elevated: false, stoppable: true };
       }
       if (await isProcessImageRunning(candidate)) {
@@ -1449,6 +1452,7 @@ async function actionAppStart(payload) {
       // elevation — a UAC prompt is exactly the "flashing" this must avoid.
       await killToolImage(candidate);
       await sleepMs(1500);
+      await patchToolProxyConfig(candidate).catch(() => undefined);
       const retry = spawn(candidate, [], {
         detached: true,
         stdio: 'ignore',
@@ -1533,6 +1537,52 @@ async function actionAppRestart() {
  * Cert: drive disappears and the downloader's certificate check fails. Every
  * child process that may run PowerShell gets a cleaned environment.
  */
+/**
+ * The downloader manages the system proxy itself when proxy.system is true,
+ * and then verifies it every 10 seconds with `reg query`. Each of those spawns
+ * a console window on this machine, so the plugin takes that job over and the
+ * downloader is told to leave the proxy alone.
+ */
+/**
+ * First launch generates config.yaml with proxy.system enabled, and the
+ * downloader immediately hijacks the system proxy. Switch that off and put the
+ * user's proxy back from the last known good values.
+ */
+async function tameToolProxyControl(candidate, settings) {
+  let tool = null;
+  try {
+    tool = await readToolStatus(settings);
+  } catch {
+    return;
+  }
+  const ours = await currentPointsToOurProxy(tool.proxy.addr).then(state => state.ours).catch(() => false);
+  if (!ours) return;
+  const patched = await patchToolProxyConfig(candidate).catch(() => false);
+  if (!patched) return;
+  await toolRequest(settings, '/api/proxy/system/disable', { method: 'POST', body: {} }).catch(() => undefined);
+  const good = settings.lastGoodProxy?.values;
+  if (good) {
+    for (const name of PROXY_VALUE_NAMES) {
+      await writeRegValue(name, good[name] ?? null).catch(() => undefined);
+    }
+    await notifyProxyChanged();
+  }
+}
+
+async function patchToolProxyConfig(appPath) {
+  const configFile = path.join(path.dirname(appPath), 'config.yaml');
+  try {
+    const text = await fs.readFile(configFile, 'utf8');
+    if (!/^proxy:\s*$/m.test(text)) return false;
+    const patched = text.replace(/^(proxy:\s*\r?\n(?:[ \t]+.*\r?\n)*?[ \t]+system:\s*)true(\s*)$/m, '$1false$2');
+    if (patched === text) return false;
+    await fs.writeFile(configFile, patched, 'utf8');
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function childEnv() {
   const env = { ...process.env };
   delete env.PSModulePath;
