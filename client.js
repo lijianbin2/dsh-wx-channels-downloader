@@ -274,7 +274,6 @@ window.__ModuleLoader__.load({
           const [stage, setStage] = React.useState('idle');
           const [hint, setHint] = React.useState(null);
           const [result, setResult] = React.useState(null);
-          const [preview, setPreview] = React.useState(null);
           const [progress, setProgress] = React.useState(0);
           const [autoRestore, setAutoRestore] = React.useState(readAutoRestore);
           const [closeAfterDownload, setCloseAfterDownload] = React.useState(readCloseAfterDownload);
@@ -463,15 +462,12 @@ window.__ModuleLoader__.load({
             setHint(null);
             setResult(null);
             setProgress(0);
-            setPreview(null);
             setStage('working');
 
             let completed = false;
             try {
-              const fresh = await resolveLink(value);
+              const resolved = await resolveLink(value);
               if (!aliveRef.current) return;
-              const resolved = { ...fresh, url: value };
-              setPreview(resolved);
 
               setStage('downloading');
               const created = await rpc('download', { object: resolved.object, title: resolved.title, downloadDir: state?.settings?.downloadDir || '' });
@@ -935,16 +931,6 @@ window.__ModuleLoader__.load({
                           : null,
                         )))
 
-                  : null,
-
-                preview && stage !== 'done'
-                  ? h('div', { className: 'wxdl-preview' },
-                    preview.cover
-                      ? h('img', { className: 'wxdl-cover', src: preview.cover, alt: '', loading: 'lazy' })
-                      : h('div', { className: 'wxdl-cover wxdl-cover-empty' }, h(Glyph, { name: 'download', size: 20 })),
-                    h('div', { className: 'wxdl-preview-body' },
-                      h('div', { className: 'wxdl-preview-title' }, preview.title || t('已解析到视频', 'Video resolved')),
-                      h('div', { className: 'wxdl-preview-meta' }, [preview.author, preview.duration ? Math.round(preview.duration) + 's' : null].filter(Boolean).join(' · ') || '')))
                   : null,
 
                 hint
